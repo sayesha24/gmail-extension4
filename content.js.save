@@ -1,0 +1,484 @@
+
+// Gmail Email Extractor and Database Sender
+// This script runs on Gmail pages and adds the "Send to Database" button
+
+// Configuration
+let API_BASE_URL = 'http://localhost:3000/api';
+
+// Load API configuration from storage
+chrome.storage.sync.get(['apiUrl', 'dbType'], function(result) {
+  if (result.apiUrl && (result.dbType === 'api' || result.dbType === 'mysql')) {
+    API_BASE_URL = result.apiUrl;
+  }
+});
+
+// Wait for Gmail to load
+function waitForGmail() {
+  if (window.location.hostname === 'mail.google.com') {
+    console.log('Gmail detected, initializing email database extension...');
+    initializeExtension();
+  }
+}
+
+// Initialize the extension
+function initializeExtension() {
+  // Wait for Gmail to fully load
+  setTimeout(() => {
+    addSendToDatabaseButton();
+    
+    // Monitor for URL changes (Gmail is a SPA)
+    let lastUrl = location.href;
+    new MutationObserver(() => {
+      const url = location.href;
+      if (url !== lastUrl) {
+        lastUrl = url;
+        setTimeout(addSendToDatabaseButton, 1000);
+      }
+    }).observe(document, { subtree: true, childList: true });
+    
+  }, 2000);
+}
+
+// Add the "Send to Database" button
+function addSendToDatabaseButton() {
+  // Remove existing button if present
+  const existingButton = document.querySelector('.crane-db-button');
+  if (existingButton) {
+    existingButton.remove();
+  }
+  
+  // Check if we're viewing an email
+  if (!isEmailView()) {
+    return;
+  }
+  
+  // Find the toolbar where we'll add our button
+  const toolbar = findEmailToolbar();
+  if (!toolbar) {
+    console.log('Email toolbar not found, retrying...');
+    setTimeout(addSendToDatabaseButton, 1000);
+    return;
+  }
+  
+  // Create the button
+  const button = createSendButton();
+  
+  // Add button to toolbar
+  toolbar.appendChild(button);
+  console.log('Send to Database button added');
+}
+
+// Check if current view is an email
+function isEmailView() {
+  // Gmail email view indicators
+  return document.querySelector('[data-message-id]') !== null ||
+         document.querySelector('.ii.gt .a3s') !== null ||
+         document.querySelector('.AO .adn') !== null ||
+         location.href.includes('/mail/u/') && location.href.includes('#inbox/');
+}
+
+// Find the email toolbar
+function findEmailToolbar() {
+  // Try multiple selectors for different Gmail layouts
+  const toolbarSelectors = [
+    '.G-Ni.J-J5-Ji',           // Main email toolbar
+    '.ar9.T-I-J3.J-J5-Ji',     // Alternative toolbar
+    '.aaq',                    // Another toolbar variant
+    '.G-Ni',                   // Simplified selector
+    '[role="toolbar"]'         // Generic toolbar
+  ];
+  
+  for (const selector of toolbarSelectors) {
+    const toolbar = document.querySelector(selector);
+    if (toolbar) {
+      return toolbar;
+    }
+  }
+  
+  // If no specific toolbar found, try to find any suitable container
+  const containers = document.querySelectorAll('.T-I-J3, .ar, .G-Ni');
+  for (const container of containers) {
+    if (container.offsetParent !== null) { // Check if visible
+      return container;
+    }
+  }
+  
+  return null;
+}
+
+// Create the send button
+function createSendButton() {
+  const button = document.createElement('div');
+  button.className = 'T-I J-J5-Ji ar7 nf T-I-ax7 L3 crane-db-button';
+  button.style.cssText = `
+    background: #4285f4;
+    color: white;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+    user-select: none;
+  `;
+  
+  button.innerHTML = '📤 Send to Database';
+  
+  // Hover effects
+  button.addEventListener('mouseenter', () => {
+    button.style.backgroundColor = '#3367d6';
+  });
+  
+  button.addEventListener('mouseleave', () => {
+    button.style.backgroundColor = '#4285f4';
+  });
+  
+  // Click handler
+  button.addEventListener('click', handleSendToDatabase);
+  
+  return button;
+}
+
+// Handle sending email to database
+async function handleSendToDatabase(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  
+  const button = event.target;
+  const originalText = button.innerHTML;
+  
+  // Show loading state
+  button.innerHTML = '⏳ Sending...';
+  button.style.backgroundColor = '#ffa500';
+  button.style.pointerEvents = 'none';
+  
+  try {
+    // Extract email data
+    const emailData = extractEmailData();
+    
+    if (!emailData) {
+      throw new Error('Could not extract email data');
+    }
+    
+    // Send to database
+    const result = await sendEmailToDatabase(emailData);
+    
+    if (result.success) {
+      // Success state
+      button.innerHTML = '✅ Sent!';
+      button.style.backgroundColor = '#0f9d58';
+      
+      // Show success notification with Gmail link
+      showNotification(`Email sent to database successfully! Gmail link: ${result.gmail_link}`, 'success');
+      
+    } else {
+      throw new Error(result.message || 'Failed to send email');
+    }
+    
+  } catch (error) {
+    console.error('Error sending email to database:', error);
+    
+    // Error state
+    button.innerHTML = '❌ Failed';
+    button.style.backgroundColor = '#d93025';
+    
+    // Show error notification
+    showNotification('Failed to send email: ' + error.message, 'error');
+  }
+  
+  // Reset button after 2 seconds
+  setTimeout(() => {
+    button.innerHTML = originalText;
+    button.style.backgroundColor = '#4285f4';
+    button.style.pointerEvents = 'auto';
+  }, 2000);
+}
+
+// Extract email data from Gmail DOM
+function extractEmailData() {
+  try {
+    // Get Gmail message ID from URL (more reliable)
+    const messageId = getMessageIdFromUrl();
+    
+    // Extract subject
+    const subject = extractSubject();
+    
+    // Extract sender
+    const sender = extractSender();
+    
+    // Extract recipient(s)
+    const recipient = extractRecipient();
+    
+    // Extract date
+    const dateReceived = extractDate();
+    
+    // Extract email content
+    const content = extractContent();
+    
+    // Extract attachments info
+    const attachments = extractAttachments();
+    
+    return {
+      emailId: messageId,
+      subject: subject,
+      sender: sender,
+      recipient: recipient,
+      dateReceived: dateReceived,
+      content: content,
+      attachments: attachments
+    };
+    
+  } catch (error) {
+    console.error('Error extracting email data:', error);
+    return null;
+  }
+}
+
+// Get message ID from URL (more reliable for Gmail links)
+function getMessageIdFromUrl() {
+  const url = window.location.href;
+  
+  // Extract message ID from Gmail URL patterns
+  const patterns = [
+    /\/mail\/u\/\d+\/#inbox\/([a-f0-9]+)/,  // Standard inbox view
+    /\/mail\/u\/\d+\/#[^\/]+\/([a-f0-9]+)/, // Other folder views
+    /\/([a-f0-9]{16})$/,                     // Direct message URL
+  ];
+  
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  
+  // Fallback: try to get from DOM
+  const messageElement = document.querySelector('[data-message-id]');
+  if (messageElement) {
+    return messageElement.getAttribute('data-message-id');
+  }
+  
+  // Last resort: generate a unique ID based on email content
+  const subject = extractSubject();
+  const sender = extractSender();
+  const timestamp = Date.now();
+  return btoa(`${subject}-${sender}-${timestamp}`).replace(/[^a-zA-Z0-9]/g, '').substring(0, 16);
+}
+
+// Extract subject
+function extractSubject() {
+  const selectors = [
+    'h2[data-thread-perm-id]',
+    '.hP',
+    '.bog',
+    '.hP .bog',
+    '[data-thread-perm-id] .bog'
+  ];
+  
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (element && element.textContent.trim()) {
+      return element.textContent.trim();
+    }
+  }
+  
+  return 'No Subject';
+}
+
+// Extract sender
+function extractSender() {
+  const selectors = [
+    '.go .g2',
+    '.gD',
+    '.gb .g2',
+    '.yW .g2',
+    'span[email]'
+  ];
+  
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (element) {
+      const email = element.getAttribute('email');
+      if (email) return email;
+      
+      const text = element.textContent.trim();
+      if (text) return text;
+    }
+  }
+  
+  return 'Unknown Sender';
+}
+
+// Extract recipient
+function extractRecipient() {
+  // This is harder to extract reliably in Gmail
+  // Try to find "To:" information
+  const toElements = document.querySelectorAll('.hb .g2');
+  const recipients = [];
+  
+  for (const element of toElements) {
+    const email = element.getAttribute('email');
+    if (email) {
+      recipients.push(email);
+    } else {
+      const text = element.textContent.trim();
+      if (text && text.includes('@')) {
+        recipients.push(text);
+      }
+    }
+  }
+  
+  return recipients.join(', ') || 'Unknown Recipient';
+}
+
+// Extract date
+function extractDate() {
+  const selectors = [
+    '.g3',
+    '.hb .g3',
+    '.abl .g3',
+    '[title*="GMT"]'
+  ];
+  
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (element) {
+      const title = element.getAttribute('title');
+      if (title) {
+        const date = new Date(title);
+        if (!isNaN(date.getTime())) {
+          return date.toISOString();
+        }
+      }
+      
+      const text = element.textContent.trim();
+      if (text) {
+        const date = new Date(text);
+        if (!isNaN(date.getTime())) {
+          return date.toISOString();
+        }
+      }
+    }
+  }
+  
+  return new Date().toISOString();
+}
+
+// Extract content
+function extractContent() {
+  const selectors = [
+    '.ii.gt .a3s',
+    '.ii.gt',
+    '.adn.ads .ii.gt',
+    'div[dir="ltr"]'
+  ];
+  
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (element) {
+      return element.innerHTML || element.textContent || '';
+    }
+  }
+  
+  return 'Content not available';
+}
+
+// Extract attachments
+function extractAttachments() {
+  const attachments = [];
+  const attachmentElements = document.querySelectorAll('.aZo, .aZp');
+  
+  for (const element of attachmentElements) {
+    const nameElement = element.querySelector('.aV3');
+    const sizeElement = element.querySelector('.SaHBd');
+    
+    if (nameElement) {
+      attachments.push({
+        name: nameElement.textContent.trim(),
+        size: sizeElement ? sizeElement.textContent.trim() : 'Unknown size'
+      });
+    }
+  }
+  
+  return attachments;
+}
+
+// Send email to database
+async function sendEmailToDatabase(emailData) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/emails`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(emailData)
+    });
+    
+    const result = await response.json();
+    return result;
+    
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+}
+
+// Show notification
+function showNotification(message, type = 'info') {
+  // Create notification element
+  const notification = document.createElement('div');
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: ${type === 'success' ? '#0f9d58' : type === 'error' ? '#d93025' : '#4285f4'};
+    color: white;
+    padding: 12px 24px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    z-index: 10000;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    animation: slideInRight 0.3s ease-out;
+    max-width: 400px;
+    word-wrap: break-word;
+  `;
+  
+  notification.textContent = message;
+  
+  // Add animation styles
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideInRight {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideOutRight {
+      from { transform: translateX(0); opacity: 1; }
+      to { transform: translateX(100%); opacity: 0; }
+    }
+  `;
+  document.head.appendChild(style);
+  
+  document.body.appendChild(notification);
+  
+  // Remove after 5 seconds (longer for success messages with links)
+  const duration = type === 'success' ? 8000 : 3000;
+  setTimeout(() => {
+    notification.style.animation = 'slideOutRight 0.3s ease-out';
+    setTimeout(() => {
+      if (notification.parentNode) {
+        notification.parentNode.removeChild(notification);
+      }
+    }, 300);
+  }, duration);
+}
+
+// Initialize when page loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', waitForGmail);
+} else {
+  waitForGmail();
+}

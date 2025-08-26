@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Crane Email Database",
+  "version": "1.0.0",
+  "description": "Send approved Gmail emails to your database with one click",
+  
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "downloads"
+  ],
+  
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "http://localhost:3000/*",
+    "https://web2.revacranes.com/*"
+  ],
+  
+  "background": {
+    "service_worker": "background.js"
+  },
+  
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Crane Email Database"
+  },
+  
+  
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.js"],
+      "matches": ["https://mail.google.com/*"]
+    }
+  ]
+}
